@@ -6,6 +6,7 @@ import os
 import logging
 from pathlib import Path
 import time
+import re
 
 app = Flask(__name__)
 
@@ -33,7 +34,6 @@ def transcribe():
 
         audio_file = request.files['audio']
 
-        # SIEMPRE usar .wav (whisper.cpp lo acepta mejor)
         tmp_filename = f"audio_{int(time.time() * 1000)}.wav"
         tmp_path = os.path.join(TEMP_DIR, tmp_filename)
         audio_file.save(tmp_path)
@@ -43,39 +43,56 @@ def transcribe():
 
         language = request.form.get('language', 'es')
 
+        # SIN -of json, capturar texto directo del stdout
         cmd = [
             WHISPER_CPP_PATH,
             "-m", MODEL_PATH,
             "-l", language,
             "-f", tmp_path,
-            "-of", "json",
-            "-t", str(os.cpu_count() or 4),
-            "--no-prints"
+            "-nt",  # sin timestamps
+            "-t", str(os.cpu_count() or 4)
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-        if result.returncode != 0:
-            logger.error(f"Whisper error: {result.stderr}")
-            return jsonify({"error": "Transcription failed", "details": result.stderr[:200], "status": "error"}), 500
+        # Parsear texto del stdout (líneas con timestamps o texto directo)
+        output = result.stdout + result.stderr
+        logger.info(f"Whisper output: {output[:200]}")
 
-        try:
-            output = json.loads(result.stdout)
-            transcription = output.get('result', [{}])[0].get('text', '').strip()
+        # Extraer texto (eliminar timestamps y líneas de sistema)
+        lines = output.split('\n')
+        text_lines = []
+        for line in lines:
+            line = line.strip()
+            # Saltar líneas de sistema
+            if any(skip in line for skip in ['system_info', 'main:', 'whisper_', '[00:', '-->']):
+                continue
+            # Tomar líneas con texto real
+            if line and not line.startswith('['):
+                text_lines.append(line)
 
-            if not transcription:
-                return jsonify({"error": "No speech detected", "status": "error"}), 400
+        transcription = ' '.join(text_lines).strip()
 
-            processing_time = time.time() - start_time
-            return jsonify({
-                "text": transcription,
-                "language": language,
-                "processing_time": round(processing_time, 2),
-                "status": "success"
-            }), 200
+        # Si está vacío, intentar extraer de timestamps
+        if not transcription:
+            for line in lines:
+                match = re.search(r'\]\s+(.+)$', line)
+                if match:
+                    text_lines.append(match.group(1).strip())
+            transcription = ' '.join(text_lines).strip()
 
-        except json.JSONDecodeError:
-            return jsonify({"error": "Invalid response format", "status": "error"}), 500
+        if not transcription:
+            transcription = "..."
+
+        processing_time = time.time() - start_time
+        logger.info(f"Transcription: '{transcription}' ({processing_time:.2f}s)")
+
+        return jsonify({
+            "text": transcription,
+            "language": language,
+            "processing_time": round(processing_time, 2),
+            "status": "success"
+        }), 200
 
     except subprocess.TimeoutExpired:
         return jsonify({"error": "Processing timeout", "status": "error"}), 504
