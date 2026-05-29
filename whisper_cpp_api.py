@@ -34,16 +34,11 @@ def transcribe():
         output = result.stdout + result.stderr
         logger.info(f"Whisper output: {output[:200]}")
 
-        transcription = ""
-        for line in output.split('\n'):
-            line = line.strip()
-            if any(skip in line for skip in ['whisper_', 'system_info', 'main:', 'ggml_']):
-                break
-            if not line or line.startswith('[') or '-->' in line:
-                continue
-            transcription += line + " "
-
-        transcription = transcription.strip()
+        import re
+        match = re.match(r'^(.*?)whisper_', output, re.DOTALL)
+        raw = match.group(1) if match else ""
+        lines = [l.strip() for l in raw.split("\n") if l.strip() and not l.strip().startswith("[")]
+        transcription = " ".join(lines).strip()
         if not transcription:
             transcription = "..."
 
